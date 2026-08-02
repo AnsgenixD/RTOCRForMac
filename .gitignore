@@ -1,0 +1,32 @@
+# Xcode
+.DS_Store
+build/
+DerivedData/
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+xcuserdata/
+*.xccheckout
+*.moved-aside
+*.xcuserstate
+*.xcscmblueprint
+*.hmap
+
+# SwiftPM
+.build/
+.swiftpm/
+
+# CocoaPods / Carthage (if ever added)
+Pods/
+Carthage/Build/
+
+# App-generated local data — don't ship a stale/personal translation cache
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# API keys — never commit real secrets. Copy Secrets.example.swift to
+# Secrets.swift, add your real DeepL key there; Secrets.swift stays local.
+Secrets.swift
+**/TranslationManager.swift.secrets
