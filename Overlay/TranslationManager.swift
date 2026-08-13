@@ -14,13 +14,20 @@ class TranslationManager {
 
     private var db: OpaquePointer?
 
-    /*Put your DeepL API key here (get one at https://www.deepl.com/pro-api).
-     Free tier keys end in ":fx" and must hit api-free.deepl.com, not api.deepl.com.
-     DeepL key lives in Secrets.swift (gitignored — see README) so a real key never gets committed to the public repo. Secrets.swift just
-     needs to define: let deepLAPIKeyValue = "your-real-key-here" */
-    
-    private let deepLAPIKey = "deepLAPIKeyValue"
-    private var deepLIsFreeTier = true
+    // The actual translation backend. Selected in Settings (persisted in
+    // UserDefaults) and re-read before each request so a Settings change
+    // takes effect immediately without restarting the app.
+    private var provider: TranslationProvider {
+        switch TranslationBackend.current {
+        case .appleMT:
+            return AppleTranslationProvider()
+        case .deepl:
+            // Guard against a persisted DeepL choice with no key configured
+            // (e.g. Secrets.swift placeholder) — silently fall back to Apple MT.
+            guard DeepLTranslationProvider.keyIsConfigured else { return AppleTranslationProvider() }
+            return DeepLTranslationProvider()
+        }
+    }
 
     // Tracks lines currently being translated so a line still visible across
     // several 50ms capture cycles doesn't spawn a new Apple MT request every
@@ -50,10 +57,10 @@ class TranslationManager {
     }
 
     /// Main entry point used by OCRManager. Returns immediately with a cached hit
-    /// if one exists; otherwise runs Apple's on-device translation and returns
-    /// the result. This is the function that was previously never being called —
-    /// OCRManager was calling checkLocalDatabase() directly and using its `nil`
-    /// fallback (raw Japanese text) whenever nothing was cached.
+    /// if one exists; otherwise hands off to the user-selected TranslationProvider
+    /// (Apple MT by default, DeepL if configured — see Settings) and caches the
+    /// result. Cache lookup + in-flight dedup live here so every provider gets
+    /// them for free.
     func translate(japaneseText: String) async -> (text: String, source: String) {
         print("🔤 translate() called for: \"\(japaneseText)\"")
 
@@ -75,46 +82,14 @@ class TranslationManager {
             inFlightQueue.sync { inFlight.remove(japaneseText) }
         }
 
-        if #available(macOS 15.0, *) {
-            let sourceLang = Locale.Language(identifier: "ja")
-            let targetLang = Locale.Language(identifier: "en")
+        let result = await provider.translate(japaneseText)
 
-            let availability = LanguageAvailability()
-            let status = await availability.status(from: sourceLang, to: targetLang)
-            print("🔤 → LanguageAvailability status: \(status)")
-
-            switch status {
-            case .installed:
-                do {
-                    let session = TranslationSession(installedSource: sourceLang, target: targetLang)
-                    let response = try await session.translate(japaneseText)
-                    print("🔤 → Apple MT SUCCESS: \"\(response.targetText)\"")
-                    insertOrUpdateSQLite(japanese: japaneseText, english: response.targetText)
-                    return (response.targetText, "Apple MT")
-                } catch {
-                    print("⚠️ Apple Translation failed even though marked installed: \(error)")
-                    return (japaneseText, "Raw OCR")
-                }
-
-            case .supported:
-                print("🔤 → status is .supported, NOT .installed — pack shows in Settings but system doesn't consider it ready")
-                await MainActor.run {
-                    PanelData.shared.statusText = "Japanese language pack not installed — download it in System Settings → General → Language & Region → Translation Languages"
-                }
-                return (japaneseText, "Raw OCR — JA pack missing")
-
-            case .unsupported:
-                print("🔤 → status is .unsupported")
-                return (japaneseText, "Raw OCR — unsupported pair")
-
-            @unknown default:
-                print("🔤 → status is unknown case")
-                return (japaneseText, "Raw OCR")
-            }
-        } else {
-            print("🔤 → macOS < 15, Translation framework unavailable")
-            return (japaneseText, "Raw OCR")
+        // Cache successful provider output (source label starting with "Raw OCR"
+        // means the provider fell back to the original text — nothing to cache).
+        if !result.source.hasPrefix("Raw OCR") && result.text != japaneseText {
+            insertOrUpdateSQLite(japanese: japaneseText, english: result.text)
         }
+        return result
     }
 
     /// Manual "improve this translation" trigger — call this when the user
@@ -125,63 +100,27 @@ class TranslationManager {
     /// and overwrites the SQLite cache entry so future detections of the
     /// same line get the improved version for free.
     func improveTranslation(for blockId: String, originalText: String) {
-        guard deepLAPIKey != "YOUR_DEEPL_API_KEY_HERE" else {
-            print("⚠️ Set your DeepL API key in TranslationManager before using improveTranslation()")
+        guard DeepLTranslationProvider.keyIsConfigured else {
+            print("⚠️ Set your DeepL API key in Secrets.swift before using improveTranslation()")
+            DispatchQueue.main.async {
+                PanelData.shared.statusText = "DeepL not configured — add your API key in Secrets.swift"
+            }
             return
         }
 
         Task {
             do {
-                let improved = try await callDeepL(text: originalText)
+                let improved = try await DeepLTranslationProvider.callDeepL(text: originalText)
                 insertOrUpdateSQLite(japanese: originalText, english: improved)
 
                 await MainActor.run {
-                    PanelData.shared.updateBlockText(id: blockId, newText: improved)
+                    PanelData.shared.updateBlockText(id: blockId, newText: improved, source: "DeepL (improved)")
                     PanelData.shared.statusText = "Source: DeepL (improved)"
                 }
             } catch {
                 print("⚠️ DeepL improve failed: \(error)")
             }
         }
-    }
-
-    private func callDeepL(text: String) async throws -> String {
-        let host = deepLIsFreeTier ? "api-free.deepl.com" : "api.deepl.com"
-        guard let url = URL(string: "https://\(host)/v2/translate") else {
-            throw URLError(.badURL)
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("DeepL-Auth-Key \(deepLAPIKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-
-        let bodyParams = [
-            "text": text,
-            "source_lang": "JA",
-            "target_lang": "EN-US"
-        ]
-        request.httpBody = bodyParams
-            .map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")" }
-            .joined(separator: "&")
-            .data(using: .utf8)
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-            throw URLError(.badServerResponse)
-        }
-
-        struct DeepLResponse: Decodable {
-            struct Translation: Decodable { let text: String }
-            let translations: [Translation]
-        }
-
-        let decoded = try JSONDecoder().decode(DeepLResponse.self, from: data)
-        guard let translated = decoded.translations.first?.text else {
-            throw URLError(.cannotParseResponse)
-        }
-        return translated
     }
 
     // --- Native SQLite Implementation ---
@@ -281,6 +220,18 @@ extension TranslationManager {
             sqlite3_step(insertStatement)
         }
         sqlite3_finalize(insertStatement)
+    }
+
+    /// Empties the SQLite translation cache ("Reset Translation Cache" menu
+    /// item). The caller (Overlay menu) is responsible for the confirmation
+    /// alert — this is destructive and unrecoverable.
+    func clearCache() {
+        let deleteStatementString = "DELETE FROM translations;"
+        if sqlite3_exec(db, deleteStatementString, nil, nil, nil) == SQLITE_OK {
+            print("🗑️ Translation cache cleared")
+        } else {
+            print("❌ Failed to clear translation cache")
+        }
     }
 
 }

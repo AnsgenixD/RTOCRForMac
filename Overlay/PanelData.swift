@@ -17,12 +17,13 @@ struct RecognizedTextBlock: Identifiable {
     // line of dialogue keeps the same id across frames, so the patch lands.
     let id: String
     var text: String            // mutable so translation can update it in place
+    var source: String          // where the current `text` came from ("Local DB", "Apple MT", "Raw OCR", …)
     let originalText: String    // raw OCR/Japanese text, used for improveTranslation()
     let frame: CGRect
     let backgroundColor: Color
     let textColor: Color
 
-    init(text: String, originalText: String, frame: CGRect, backgroundColor: Color, textColor: Color) {
+    init(text: String, source: String, originalText: String, frame: CGRect, backgroundColor: Color, textColor: Color) {
         // Bucket position to ~2% of panel size (0.02 in normalized 0-1 space).
         // Coarse enough that minor per-frame OCR jitter in a box's exact
         // coordinates doesn't break id stability, fine enough that two
@@ -32,6 +33,7 @@ struct RecognizedTextBlock: Identifiable {
         let positionKey = "\(bucket(frame.origin.x)):\(bucket(frame.origin.y))"
         self.id = originalText.trimmingCharacters(in: .whitespacesAndNewlines) + "@" + positionKey
         self.text = text
+        self.source = source
         self.originalText = originalText
         self.frame = frame
         self.backgroundColor = backgroundColor
@@ -57,17 +59,27 @@ class PanelData: ObservableObject {
     // (Cmd+Option+X) briefly to move/resize the panel, then back on.
     @Published var isClickThrough: Bool = true
 
+    // Incremented by the "Prepare Translation Pack" menu item. ContentView's
+    // .translationTask(id:) modifier watches this token — changing it re-runs
+    // prepareTranslation(), which re-shows the system language-pack download
+    // prompt (needed for users who dismissed the first-run one).
+    @Published var translationPrepToken: Int = 0
+
     // Reference to GlassPanel
     weak var glassPanel: GlassPanel?
 
     static let shared = PanelData()
 
     /// Updates a single block's displayed text in place (used when an async
-    /// translation — Apple MT or a manual DeepL "improve" — resolves after
-    /// the block was already rendered with raw/placeholder text).
-    func updateBlockText(id: String, newText: String) {
+    /// translation — Apple MT, DeepL, or a manual DeepL "improve" — resolves
+    /// after the block was already rendered with raw/placeholder text).
+    /// `source` records which backend produced the new text (shown in Help).
+    func updateBlockText(id: String, newText: String, source: String? = nil) {
         guard let index = textBlocks.firstIndex(where: { $0.id == id }) else { return }
         textBlocks[index].text = newText
+        if let source = source {
+            textBlocks[index].source = source
+        }
     }
 
     private func updatePanelGlassVisibility() {

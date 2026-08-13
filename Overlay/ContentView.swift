@@ -78,10 +78,18 @@ struct ContentView: View {
         // the user a proper system download prompt the first time. A
         // headless background Task can't trigger this; it needs a live
         // view, which is why this lives here instead of in TranslationManager.
-        .translationTask(
-            source: .init(identifier: "ja"),
-            target: .init(identifier: "en")
-        ) { session in
+        // The .id(translationPrepToken) below recreates this (invisible,
+        // zero-size) subview whenever the "Prepare Translation Pack" menu
+        // item bumps the token — recreating the view re-runs its
+        // translationTask, re-showing the system download prompt for
+        // users who dismissed the first-run one.
+        Color.clear
+            .frame(width: 0, height: 0)
+            .id(dataManager.translationPrepToken)
+            .translationTask(
+                source: .init(identifier: "ja"),
+                target: .init(identifier: "en")
+            ) { session in
             do {
                 try await session.prepareTranslation()
                 print("✅ ja→en translation pack prepared/installed for this app")

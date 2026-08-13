@@ -57,6 +57,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setupGlobalHotkeys()
         setupLocalHotkeys()
 
+        // First-launch onboarding: permissions checklist + hotkey cheatsheet
+        // instead of expecting users to have read the GitHub README.
+        // Reopenable any time via Help → Show Onboarding.
+        if AuxiliaryWindowController.shared.onboardingRequired {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                AuxiliaryWindowController.shared.showOnboarding()
+            }
+        }
+
         // Start the native Swift capture & OCR loop (checks every 50ms)
         startOCRLoop()
     }

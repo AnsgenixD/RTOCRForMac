@@ -1,0 +1,15 @@
+Future additions to MACmort:
+
+Now:
+-1: addition of more top-bar menu options / filling in the gaps.
+-2: detailed Help.
+-3: selector for different ocr and translation models.
+-4: Proper .app / packaged app.. a release
+
+
+Far off:
+1. Manga style (tategaki) jp text reading.
+2. Multilingual capabilities (not just multiple different languages- but multiple languages at the same time.)
+3. Read aloud capability- use a small stt model to read out text.
+4. Novel context haver (knows who's speaking in a novel (Mc, sidecs) using context and a slm?)
+

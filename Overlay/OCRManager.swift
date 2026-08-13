@@ -24,6 +24,12 @@ class OCRManager {
     private let sampleWidth = 32
     private let sampleHeight = 32
     private let differenceThreshold: Float = 3.5
+
+    /// UserDefaults key shared with SettingsView's @AppStorage toggle.
+    /// Fast mode trades some Kanji accuracy for lower OCR latency — the
+    /// project's stated priority is speed for game text.
+    static let usesFastOCRKey = "usesFastOCR"
+    private var usesFastOCR: Bool { UserDefaults.standard.bool(forKey: Self.usesFastOCRKey) }
     
     /// Captures the screen area directly beneath the NSPanel using ScreenCaptureKit
     func captureAndProcess(for panel: NSPanel) {
@@ -174,8 +180,10 @@ class OCRManager {
         // 2. Disable automatic language fallback (forces it to search for Japanese Kanji/Kana)
         request.automaticallyDetectsLanguage = false
         
-        // 3. Set recognition level to .accurate for higher precision with complex Kanji
-        request.recognitionLevel = .accurate
+        // 3. Recognition level: user-tunable in Settings. .fast prioritizes
+        // speed (this project's priority for game text); .accurate is the
+        // default for complex Kanji precision.
+        request.recognitionLevel = usesFastOCR ? .fast : .accurate
         request.usesLanguageCorrection = true
         
         let isVertical = PanelData.shared.isVerticalScanning
@@ -228,10 +236,13 @@ class OCRManager {
                     height: boundingBox.size.height
                 )
                 
-                let translatedText = TranslationManager.shared.checkLocalDatabase(for: rawText) ?? rawText
+                let cached = TranslationManager.shared.checkLocalDatabase(for: rawText)
+                let translatedText = cached ?? rawText
+                let initialSource = cached != nil ? "Local DB" : "OCR (translating…)"
 
                 blocks.append(RecognizedTextBlock(
                     text: translatedText,
+                    source: initialSource,
                     originalText: rawText,
                     frame: normalizedBox,
                     backgroundColor: Color(nsColor: bgColor),
@@ -242,11 +253,11 @@ class OCRManager {
                 // Dispatch translation queries for uncached lines.
                 // Looping over `blocks` (not `observations`) means each Task already
                 // knows exactly which block.id to patch once translation resolves.
-            for block in blocks {
+            for block in blocks where block.source != "Local DB" {
                 Task {
                     let result = await TranslationManager.shared.translate(japaneseText: block.originalText)
                     await MainActor.run {
-                        PanelData.shared.updateBlockText(id: block.id, newText: result.text)
+                        PanelData.shared.updateBlockText(id: block.id, newText: result.text, source: result.source)
                     }
                 }
             }

@@ -1,0 +1,88 @@
+# Release workflow for MACmort (Overlay).
+#
+# On pushing a tag like `v1.0.0`, this builds a signed, notarized,
+# drag-to-Applications DMG and attaches it to a GitHub Release.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   APPLE_CERTIFICATE            — base64 of the "Developer ID Application" .p12
+#   APPLE_CERTIFICATE_PASSWORD   — password of that .p12
+#   KEYCHAIN_PASSWORD            — any password used for the temporary keychain
+#   APPLE_ID                     — Apple Developer account email (for notarization)
+#   APPLE_TEAM_ID                — 10-character Team ID
+#   APPLE_APP_SPECIFIC_PASSWORD  — app-specific password for appleid notarization
+#                                  (create at appleid.apple.com → Sign-In and Security)
+#
+# Until these are configured, the workflow will fail at the import step.
+# See RELEASE_NOTES.md for what the finished release must document.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, sign, notarize, DMG
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install signing certificate into temporary keychain
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          CERTIFICATE_PATH=$RUNNER_TEMP/build_cert.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain-db
+
+          echo -n "$APPLE_CERTIFICATE" | base64 --decode -o "$CERTIFICATE_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -T /usr/bin/codesign -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
+
+      - name: Store notarytool credentials
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          xcrun notarytool store-credentials MACMORT_NOTARY_PROFILE \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --keychain "$RUNNER_TEMP/build.keychain-db"
+
+      - name: Build and package DMG
+        env:
+          SIGNING_IDENTITY: "Developer ID Application"
+        run: |
+          ./scripts/build-dmg.sh \
+            --signing-identity "$SIGNING_IDENTITY" \
+            --notary-profile MACMORT_NOTARY_PROFILE \
+            --output "MACmort-${GITHUB_REF_NAME}.dmg"
+
+      - name: Create GitHub Release and attach DMG
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "MACmort-${GITHUB_REF_NAME}.dmg" \
+            --title "MACmort ${GITHUB_REF_NAME}" \
+            --generate-notes
+
+      - name: Clean up keychain
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/build.keychain-db" || true
