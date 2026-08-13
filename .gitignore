@@ -30,3 +30,7 @@ Carthage/Build/
 # Secrets.swift, add your real DeepL key there; Secrets.swift stays local.
 Secrets.swift
 **/TranslationManager.swift.secrets
+ARCHITECTURE.md
+MACmort-v1.0.0.dmg
+Overlay.xcodeproj/project.pbxproj
+Overlay.xcodeproj/project.xcworkspace/xcuserdata/ansgenix.xcuserdatad/UserInterfaceState.xcuserstate
