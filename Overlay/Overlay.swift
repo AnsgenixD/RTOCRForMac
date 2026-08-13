@@ -86,7 +86,7 @@ struct Overlay: App {
                     .font(.caption)
             }
 
-            CommandMenu("Help") {
+            CommandGroup(replacing: .help) {
                 Button("Show Help & Hotkeys") {
                     AuxiliaryWindowController.shared.showHelp()
                 }
@@ -94,6 +94,12 @@ struct Overlay: App {
 
                 Button("Show Onboarding…") {
                     AuxiliaryWindowController.shared.showOnboarding()
+                }
+
+                Divider()
+
+                Button("MACmort Help") {
+                    NSWorkspace.shared.open(URL(string: "https://github.com/AnsgenixD/RTOCRForMac")!)
                 }
             }
         }
