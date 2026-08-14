@@ -30,6 +30,10 @@ Carthage/Build/
 # Secrets.swift, add your real DeepL key there; Secrets.swift stays local.
 Secrets.swift
 **/TranslationManager.swift.secrets
+
+# CI / tooling — managed locally, not tracked
+.github/workflows/
+.zcode/plans/
 ARCHITECTURE.md
 MACmort-v1.0.0.dmg
 Overlay.xcodeproj/project.pbxproj
