@@ -5,31 +5,23 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 [![Platform: macOS](https://img.shields.io/badge/Platform-macOS-lightgrey.svg)](https://www.apple.com/macos/)
 
-**MACMort** is a transparent, floating macOS overlay designed to detect Japanese text on screen in real time and render English translations directly over the original text. Perfect for games, visual novels, manga readers, and web browsers, MACMort combines low-latency screen capture, native computer vision, and privacy-first on-device translation.
+**MACMort** is a transparent, floating macOS overlay designed to detect Japanese text on screen in real time and render English translations directly over the original text. Perfect for games, visual novels, and manga readers.
 
 ---
 
 ## Architecture & Data Flow
 
-```
- ┌──────────────────────┐      ┌─────────────────────────┐
- │   Screen Capture     │ ───► │    Apple Vision OCR     │
- │  (ScreenCaptureKit)  │      │ (VNRecognizeTextRequest)│
- └──────────────────────┘      └────────────┬────────────┘
-                                            │ Extracted Bounding Boxes & Text
-                                            ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                      Tiered Translation Engine                         │
-│                                                                        │
-│   1. Local SQLite Cache ────► 2. On-Device Translation ────► 3. DeepL  │
-│      (Instant / Offline)         (Apple MT - Private)       (Optional) │
-└───────────────────────────────────────────┬────────────────────────────┘
-                                            │ Translated Text & Coordinates
-                                            ▼
-                               ┌─────────────────────────┐
-                               │ Dynamic HUD Overlay UI  │
-                               │  (NSPanel + SwiftUI)    │
-                               └─────────────────────────┘
+```mermaid
+graph TD
+    A[Screen Capture<br/>ScreenCaptureKit] -->|Frame Regions ~20 FPS| B[Apple Vision OCR<br/>VNRecognizeTextRequest]
+    B -->|Text & Bounding Boxes| C{Tiered Translation}
+    C -->|Instant Lookup| D1[Local SQLite Cache]
+    C -->|Private Offline| D2[Apple Translation<br/>Framework]
+    C -->|Optional Refinement| D3[DeepL API]
+    D1 --> E[Dynamic HUD Overlay<br/>NSPanel + SwiftUI]
+    D2 --> E
+    D3 --> E
+    E -->|Rendered Patches| F[Display on Screen]
 ```
 
 ---
@@ -45,7 +37,7 @@
 - **Floating HUD & Click-Through Mode:**
   - **Click-Through (`⌥⌘X`):** Pass mouse clicks directly through the overlay to underlying games or applications.
   - **HUD Mode (`⌥⌘H`):** Toggle frosted-glass backdrop, leaving only floating translation patches.
-- **Dynamic Background Color Patching:** Color-samples pixel bounds around detected text to render matching background patches, cleanly obscuring original Japanese text before displaying English overlays.
+- **Dynamic Background Color Patching:** Color-samples pixel bounds around detected text to render matching background patches, cleanly obscuring original Japanese text before displaying English output.
 - **OCR Tuning & Backend Picker:** Configure recognition levels (Fast vs. Accurate) and switch translation providers on the fly in Settings.
 
 ---
@@ -101,8 +93,8 @@
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/dev-pd-1525/Muro.git
-cd Muro
+git clone https://github.com/AnsgenixD/RTOCRForMac.git
+cd RTOCRForMac
 
 # 2. Configure DeepL API Key (Optional)
 cp Secrets.example.swift Overlay/Secrets.swift
