@@ -20,10 +20,18 @@ class OCRManager {
     static let shared = OCRManager()
     
     private var isProcessing = false
+    private var needsReprocess = false
+    
+    // Baseline downsampled buffer from the frame where OCR was last executed
+    private var lastProcessedBuffer: [UInt8]?
+    // Buffer from the immediately preceding frame for motion / stabilization tracking
     private var previousFrameBuffer: [UInt8]?
-    private let sampleWidth = 32
+    // Timestamp when OCR was last executed
+    private var lastOCRCompletionTime: CFAbsoluteTime = 0
+    
+    // 96x32 preserves the ~3:1 aspect ratio typical of game subtitle and dialogue boxes
+    private let sampleWidth = 96
     private let sampleHeight = 32
-    private let differenceThreshold: Float = 3.5
 
     /// UserDefaults key shared with SettingsView's @AppStorage toggle.
     /// Fast mode trades some Kanji accuracy for lower OCR latency — the
@@ -33,8 +41,11 @@ class OCRManager {
     
     /// Captures the screen area directly beneath the NSPanel using ScreenCaptureKit
     func captureAndProcess(for panel: NSPanel) {
-        // 1. Prevent race conditions / timer queue backlogs
-        guard !isProcessing else { return }
+        // If an OCR pass is already active, flag that a newer frame has arrived so we catch up immediately
+        if isProcessing {
+            needsReprocess = true
+            return
+        }
 
         // 2. Preflight macOS Screen Capture Permissions
         guard CGPreflightScreenCaptureAccess() else {
@@ -55,17 +66,17 @@ class OCRManager {
         // Checker violation: -[NSWindow windowNumber] called off-main).
         let ownWindowID = CGWindowID(panel.windowNumber)
 
-        guard let mainScreen = NSScreen.main else {
+        guard let screen = panel.screen ?? NSScreen.main else {
             isProcessing = false
             return
         }
 
-        let screenHeight = mainScreen.frame.height
+        let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
 
-        // Convert AppKit coordinates (bottom-left) to Screen coordinates (top-left)
+        // Convert AppKit coordinates (bottom-left) to Screen coordinates (top-left relative to this screen)
         let cropRect = CGRect(
-            x: frame.origin.x,
-            y: screenHeight - frame.origin.y - frame.size.height,
+            x: frame.origin.x - screen.frame.origin.x,
+            y: screen.frame.height - (frame.origin.y - screen.frame.origin.y) - frame.size.height,
             width: frame.size.width,
             height: frame.size.height
         )
@@ -74,7 +85,14 @@ class OCRManager {
         SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { [weak self] content, error in
             guard let self = self else { return }
 
-            guard error == nil, let content = content, let display = content.displays.first else {
+            guard error == nil, let content = content else {
+                self.isProcessing = false
+                return
+            }
+
+            let display = (screenNumber != nil ? content.displays.first { $0.displayID == screenNumber } : nil)
+                ?? content.displays.first
+            guard let display = display else {
                 self.isProcessing = false
                 return
             }
@@ -92,12 +110,22 @@ class OCRManager {
             config.showsCursor = false
 
             // Take screenshot via ScreenCaptureKit
-            SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) { cgImage, error in
-                defer { self.isProcessing = false }
+            SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) { [weak self, weak panel] cgImage, error in
+                guard let self = self else { return }
+                defer {
+                    self.isProcessing = false
+                    if self.needsReprocess {
+                        self.needsReprocess = false
+                        DispatchQueue.main.async { [weak panel] in
+                            guard let panel = panel else { return }
+                            self.captureAndProcess(for: panel)
+                        }
+                    }
+                }
 
                 guard let cgImage = cgImage, error == nil else { return }
 
-                // STEP 1: Downsampled Difference Check
+                // STEP 1: Responsive Localized Difference Check
                 if self.hasFrameChanged(cgImage) {
                     // STEP 2: Vision OCR Pass
                     self.processFrameWithBoundingBoxes(cgImage)
@@ -105,20 +133,52 @@ class OCRManager {
             }
         }
     }
+
     private func hasFrameChanged(_ image: CGImage) -> Bool {
         guard let currentBuffer = extractDownsampledBuffer(from: image) else { return true }
         
         defer { previousFrameBuffer = currentBuffer }
-        guard let prevBuffer = previousFrameBuffer else { return true }
         
-        var totalDifference: Float = 0
-        for i in 0..<(sampleWidth * sampleHeight) {
-            let diff = abs(Int32(currentBuffer[i]) - Int32(prevBuffer[i]))
-            totalDifference += Float(diff)
+        guard let lastBuffer = lastProcessedBuffer else {
+            // First capture: always run OCR and establish the baseline buffer!
+            lastProcessedBuffer = currentBuffer
+            return true
         }
         
-        let averageDiff = totalDifference / Float(sampleWidth * sampleHeight)
-        return averageDiff > differenceThreshold
+        let count = sampleWidth * sampleHeight
+        var totalDiffAgainstProcessed: Float = 0
+        var maxDiffAgainstProcessed: Int32 = 0
+        var significantPixelsAgainstProcessed = 0
+        
+        for i in 0..<count {
+            let diff = abs(Int32(currentBuffer[i]) - Int32(lastBuffer[i]))
+            totalDiffAgainstProcessed += Float(diff)
+            if diff > maxDiffAgainstProcessed { maxDiffAgainstProcessed = diff }
+            if diff > 14 {
+                significantPixelsAgainstProcessed += 1
+            }
+        }
+        
+        let avgDiffAgainstProcessed = totalDiffAgainstProcessed / Float(count)
+        
+        // 1. Localized text appearance / mutation:
+        // Even a single character appearing changes 4+ downsampled pixels by > 14 with maxDiff > 28.
+        let hasTextChanged = significantPixelsAgainstProcessed >= 4 && maxDiffAgainstProcessed > 28
+        
+        // 2. Global scene / dialogue box transition:
+        let hasSceneChanged = avgDiffAgainstProcessed > 1.2
+        
+        // 3. Stale guard: if text blocks are currently displayed on screen, but no OCR has executed
+        // for over 1.2 seconds, and there is ANY slight divergence (e.g. subtitle cleared or faded), re-verify!
+        let now = CFAbsoluteTimeGetCurrent()
+        let hasStaleDivergence = !PanelData.shared.textBlocks.isEmpty && (now - lastOCRCompletionTime > 1.2) && (avgDiffAgainstProcessed > 0.25 || maxDiffAgainstProcessed > 18)
+        
+        if hasTextChanged || hasSceneChanged || hasStaleDivergence {
+            lastProcessedBuffer = currentBuffer
+            return true
+        }
+        
+        return false
     }
     
     private func extractDownsampledBuffer(from image: CGImage) -> [UInt8]? {
@@ -134,6 +194,7 @@ class OCRManager {
             bitmapInfo: CGImageAlphaInfo.none.rawValue
         ) else { return nil }
         
+        context.interpolationQuality = .medium
         context.draw(image, in: CGRect(x: 0, y: 0, width: sampleWidth, height: sampleHeight))
         return buffer
     }
@@ -180,10 +241,11 @@ class OCRManager {
         // 2. Disable automatic language fallback (forces it to search for Japanese Kanji/Kana)
         request.automaticallyDetectsLanguage = false
         
-        // 3. Recognition level: user-tunable in Settings. .fast prioritizes
-        // speed (this project's priority for game text); .accurate is the
-        // default for complex Kanji precision.
-        request.recognitionLevel = usesFastOCR ? .fast : .accurate
+        // 3. Recognition level: user-tunable in Settings.
+        // NOTE: Apple Vision framework only supports Japanese (ja-JP) in .accurate mode.
+        // In .fast mode, Vision drops ja-JP and falls back to Latin-only.
+        let hasCJK = request.recognitionLanguages.contains { $0.hasPrefix("ja") || $0.hasPrefix("zh") || $0.hasPrefix("ko") }
+        request.recognitionLevel = (usesFastOCR && !hasCJK) ? .fast : .accurate
         request.usesLanguageCorrection = true
         
         let isVertical = PanelData.shared.isVerticalScanning
@@ -198,6 +260,7 @@ class OCRManager {
                     PanelData.shared.textBlocks = []
                     PanelData.shared.statusText = "OCR: Active (No text detected)"
                 }
+                self.lastOCRCompletionTime = CFAbsoluteTimeGetCurrent()
                 return
             }
             
@@ -213,9 +276,11 @@ class OCRManager {
                 let rawText = topCandidate.string
                 let boundingBox = observation.boundingBox // Normalized rect (0.0 to 1.0)
                 
+                // CGImage pixel coordinates (origin top-left):
+                // In Vision boundingBox, y=0 is at the bottom, so top-left y is (1.0 - origin.y - height)
                 let pixelRect = CGRect(
                     x: boundingBox.origin.x * imgWidth,
-                    y: boundingBox.origin.y * imgHeight,
+                    y: (1.0 - boundingBox.origin.y - boundingBox.size.height) * imgHeight,
                     width: boundingBox.size.width * imgWidth,
                     height: boundingBox.size.height * imgHeight
                 )
@@ -248,11 +313,11 @@ class OCRManager {
                     backgroundColor: Color(nsColor: bgColor),
                     textColor: textColor
                 ))
-                }
+            }
 
-                // Dispatch translation queries for uncached lines.
-                // Looping over `blocks` (not `observations`) means each Task already
-                // knows exactly which block.id to patch once translation resolves.
+            // Dispatch translation queries for uncached lines.
+            // Looping over `blocks` (not `observations`) means each Task already
+            // knows exactly which block.id to patch once translation resolves.
             for block in blocks where block.source != "Local DB" {
                 Task {
                     let result = await TranslationManager.shared.translate(japaneseText: block.originalText)
@@ -263,13 +328,10 @@ class OCRManager {
             }
 
             DispatchQueue.main.async {
-                PanelData.shared.textBlocks = blocks   // fires almost immediately
-            }
-            
-            DispatchQueue.main.async {
                 PanelData.shared.textBlocks = blocks
                 PanelData.shared.statusText = "OCR: Active (\(blocks.count) blocks)"
             }
+            self.lastOCRCompletionTime = CFAbsoluteTimeGetCurrent()
         } catch {
             print("❌ Vision OCR Error: \(error)")
         }

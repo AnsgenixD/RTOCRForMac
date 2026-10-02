@@ -94,11 +94,11 @@ class PanelData: ObservableObject {
     private func updatePanelOrientationBounds() {
         guard let panel = glassPanel else { return }
         if isVerticalScanning {
-            panel.minSize = NSSize(width: 160, height: 350)
-            panel.maxSize = NSSize(width: 450, height: 900)
+            panel.minSize = NSSize(width: 80, height: 150)
+            panel.maxSize = NSSize(width: 10000, height: 10000)
         } else {
-            panel.minSize = NSSize(width: 350, height: 160)
-            panel.maxSize = NSSize(width: 900, height: 450)
+            panel.minSize = NSSize(width: 120, height: 60)
+            panel.maxSize = NSSize(width: 10000, height: 10000)
         }
     }
 }

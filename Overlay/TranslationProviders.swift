@@ -98,14 +98,50 @@ final class AppleTranslationProvider: TranslationProvider {
 final class DeepLTranslationProvider: TranslationProvider {
     let name = "DeepL"
 
-    /// True when Secrets.swift contains a real-looking key (not the template
-    /// placeholder). Used to enable/disable the DeepL option in Settings.
-    static var keyIsConfigured: Bool {
+    /// DeepL API key resolution.
+    /// Condition: if key not present then don't import / use it (returns nil).
+    static var apiKey: String? {
+        // 1. Check Secrets.swift value
         let key = deepLAPIKeyValue
-        return !key.isEmpty && key != "YOUR_DEEPL_API_KEY_HERE"
+        if !key.isEmpty && key != "YOUR_DEEPL_API_KEY_HERE" {
+            return key
+        }
+        // 2. Check environment variable (e.g. DEEPL_API_KEY)
+        if let envKey = ProcessInfo.processInfo.environment["DEEPL_API_KEY"],
+           !envKey.isEmpty, envKey != "YOUR_DEEPL_API_KEY_HERE" {
+            return envKey
+        }
+        // 3. Check UserDefaults (e.g. configured via defaults write or settings)
+        if let defaultsKey = UserDefaults.standard.string(forKey: "deepLAPIKey"),
+           !defaultsKey.isEmpty, defaultsKey != "YOUR_DEEPL_API_KEY_HERE" {
+            return defaultsKey
+        }
+        // 4. Check Info.plist
+        if let infoKey = Bundle.main.infoDictionary?["DeepLAPIKey"] as? String,
+           !infoKey.isEmpty, infoKey != "YOUR_DEEPL_API_KEY_HERE" {
+            return infoKey
+        }
+        // Condition: if key not present then don't import it
+        return nil
+    }
+
+    /// True when a real API key is configured.
+    /// Condition: if key not present, don't import / enable DeepL.
+    /// Used to enable/disable the DeepL option in Settings.
+    static var keyIsConfigured: Bool {
+        guard let key = apiKey, !key.isEmpty, key != "YOUR_DEEPL_API_KEY_HERE" else {
+            return false
+        }
+        return true
     }
 
     func translate(_ text: String) async -> (text: String, source: String) {
+        // Condition: if key not present then don't import / use DeepL
+        guard Self.keyIsConfigured else {
+            print("⚠️ DeepL key not present — skipping DeepL translation")
+            return (text, "Raw OCR — DeepL not configured")
+        }
+
         do {
             let translated = try await Self.callDeepL(text: text)
             return (translated, "DeepL")
@@ -115,19 +151,22 @@ final class DeepLTranslationProvider: TranslationProvider {
         }
     }
 
-    /// DeepL key lives in Secrets.swift (gitignored — see README).
-    /// Free tier keys end in ":fx" and must hit api-free.deepl.com.
-    /// Not private — TranslationManager's manual "improve translation"
-    /// flow reuses it directly so errors can be handled distinctly.
+    /// Calls DeepL translation API.
+    /// Condition: if key not present then don't import / call it.
     static func callDeepL(text: String) async throws -> String {
-        let host = deepLAPIKeyValue.hasSuffix(":fx") ? "api-free.deepl.com" : "api.deepl.com"
+        // Condition: if key not present then don't import it
+        guard let key = apiKey, keyIsConfigured else {
+            throw URLError(.userAuthenticationRequired)
+        }
+
+        let host = key.hasSuffix(":fx") ? "api-free.deepl.com" : "api.deepl.com"
         guard let url = URL(string: "https://\(host)/v2/translate") else {
             throw URLError(.badURL)
         }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.setValue("DeepL-Auth-Key \(deepLAPIKeyValue)", forHTTPHeaderField: "Authorization")
+        request.setValue("DeepL-Auth-Key \(key)", forHTTPHeaderField: "Authorization")
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
 
         let bodyParams = [

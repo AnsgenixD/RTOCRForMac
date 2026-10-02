@@ -41,14 +41,21 @@ class GlassPanel: NSPanel {
             defer: false
         )
 
-        self.minSize = NSSize(width: 250, height: 180)
-        self.maxSize = NSSize(width: 800, height: 600)
+        self.minSize = NSSize(width: 120, height: 60)
+        // Unrestricted maximum panel size so the overlay can extend across any large display or dialogue box.
+        self.maxSize = NSSize(width: 10000, height: 10000)
         self.isOpaque = false
         self.backgroundColor = .clear
         self.hasShadow = true
-        self.level = .floating
+        // Set level to .screenSaver so the overlay floats above fullscreen games, spaces, and menus.
+        self.level = .screenSaver
+        // Critical: NSPanel defaults to hidesOnDeactivate = true, which automatically hides
+        // the panel whenever the user switches focus to a game or other app.
+        self.hidesOnDeactivate = false
         self.isMovableByWindowBackground = true
-        self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        // Allow joining all spaces including fullscreen spaces. Do NOT include .stationary,
+        // which pins the window to desktop spaces and prevents it from appearing on fullscreen spaces.
+        self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         // Force a dark vibrant appearance so .hudWindow material renders
         // its intended tint/blur rather than falling back to a flat fill.
         self.appearance = NSAppearance(named: .vibrantDark)
@@ -99,5 +106,7 @@ class GlassPanel: NSPanel {
     }
 
     override var canBecomeKey: Bool { return true }
-    override var canBecomeMain: Bool { return true }
+    // An auxiliary overlay panel must return false for canBecomeMain so it does not
+    // steal main-window status from fullscreen games or cause space-switching conflicts.
+    override var canBecomeMain: Bool { return false }
 }

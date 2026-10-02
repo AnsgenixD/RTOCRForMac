@@ -14,6 +14,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var ocrTimer: Timer?
     private var globalHotkeyMonitor: Any?
     private var localHotkeyMonitor: Any?
+    private var workspaceObservers = [NSObjectProtocol]()
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -30,10 +31,32 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         panel.contentView?.addSubview(hostingView)
         panel.center()
-        panel.makeKeyAndOrderFront(nil)
+        // orderFrontRegardless ensures the panel floats in front even when other apps
+        // (like games in fullscreen mode) are active.
+        panel.orderFrontRegardless()
 
         self.glassPanel = panel
         PanelData.shared.glassPanel = panel
+
+        // Ensure the overlay stays frontmost when spaces change (e.g. entering a fullscreen game)
+        // or when any application activates.
+        let spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.glassPanel?.orderFrontRegardless()
+        }
+        workspaceObservers.append(spaceObserver)
+
+        let appObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.glassPanel?.orderFrontRegardless()
+        }
+        workspaceObservers.append(appObserver)
 
         // Bridge PanelData's HUD toggle to the actual AppKit panel state.
         PanelData.shared.$isHudOnlyMode
@@ -127,6 +150,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     deinit {
+        for observer in workspaceObservers {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
         if let monitor = globalHotkeyMonitor {
             NSEvent.removeMonitor(monitor)
         }
